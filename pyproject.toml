@@ -1,0 +1,12 @@
+[project]
+name = "a5-warehouse-policy-search"
+version = "0.1.0"
+description = "A5: Warehouse Policy Search"
+readme = "README.md"
+authors = [
+    { name = "Atharva Marathe", email = "atharvamarathe007@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "ruff>=0.14.2",
+]
