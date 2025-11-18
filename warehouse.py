@@ -287,38 +287,28 @@ class DeliveryPlanner_PartB:
         self.todo = todo
         self.stochastic_probabilities = stochastic_probabilities
 
-        self.actions = [
-            (-1, 0, 2, "move s"),
-            (1, 0, 2, "move n"),
-            (0, -1, 2, "move e"),
-            (0, 1, 2, "move w"),
-            (-1, -1, 3, "move se"),
-            (-1, 1, 3, "move sw"),
-            (1, -1, 3, "move ne"),
-            (1, 1, 3, "move nw"),
+        self.moves = [
+            (-1, 0, 2, "move n"),  # 0
+            (-1, 1, 3, "move ne"),  # 1
+            (0, 1, 2, "move e"),  # 2
+            (1, 1, 3, "move se"),  # 3
+            (1, 0, 2, "move s"),  # 4
+            (1, -1, 3, "move sw"),  # 5
+            (0, -1, 2, "move w"),  # 6
+            (-1, -1, 3, "move nw"),  # 7
         ]
 
-        self.neighbors = [
-            (-1, 0, "n"),
-            (1, 0, "s"),
-            (0, -1, "w"),
-            (0, 1, "e"),
-            (-1, -1, "nw"),
-            (-1, 1, "ne"),
-            (1, -1, "sw"),
-            (1, 1, "se"),
-        ]
-
-        self.opposite_directions = {
-            "n": "s",
-            "s": "n",
-            "w": "e",
-            "e": "w",
-            "nw": "se",
-            "se": "nw",
-            "ne": "sw",
-            "sw": "ne",
+        self.stochastic_offsets = {
+            "as_intended": 0,
+            "slanted": [1, -1],  # +1 index, -1 index
+            "sideways": [2, -2],  # +2 index, -2 index
         }
+
+        self.max_cost = 0
+        for i in range(self.rows):
+            for j in range(self.cols):
+                if self.warehouse_cost[i][j] > self.max_cost:
+                    self.max_cost = self.warehouse_cost[i][j]
 
     def _set_initial_state_from(self, warehouse):
         """Set initial state.
@@ -352,139 +342,192 @@ class DeliveryPlanner_PartB:
                     self.warehouse_state[r][c] = box_id
                     self.boxes[box_id] = (r, c)
 
-    def plan_path(self, goals):
-        value_grid = [
-            [float("inf") for _ in range(self.cols)] for _ in range(self.rows)
-        ]
+    def _solve_mdp(self, goals):
+        """
+        Runs Value Iteration to solve the Stochastic Shortest Path problem.
+
+        Args:
+            goals: list of tuples (r, c, cost, action_str)
+                   These are the terminal states (neighbors of target).
+        """
+        value_grid = [[25 for _ in range(self.cols)] for _ in range(self.rows)]
         policy_grid = [["-1" for _ in range(self.cols)] for _ in range(self.rows)]
 
-        open_list = []
-
+        goal_coords = set()
         for r, c, cost, action in goals:
-            value_grid[r][c] = cost
-            policy_grid[r][c] = action
-            heapq.heappush(open_list, (cost, r, c))
+            if cost < value_grid[r][c]:
+                value_grid[r][c] = cost
+                policy_grid[r][c] = action
+                goal_coords.add((r, c))
 
-        while open_list:
-            cost, r, c = heapq.heappop(open_list)
+        p_intended = self.stochastic_probabilities["as_intended"]
+        p_slanted = self.stochastic_probabilities["slanted"]
+        p_sideways = self.stochastic_probabilities["sideways"]
 
-            if cost > value_grid[r][c]:
-                continue
+        max_iterations = 1000
+        epsilon = 1e-6  # Convergence threshold
 
-            for dr, dc, move_cost, action in self.actions:
-                nr = r + dr
-                nc = c + dc
+        for _ in range(max_iterations):
+            max_change = 0.0
 
-                if 0 <= nr < self.rows and 0 <= nc < self.cols:
-                    if self.warehouse_state[nr][nc] != "#":
-                        floor_cost = self.warehouse_cost[r][c]
-                        new_cost = cost + move_cost + floor_cost
+            for r in range(self.rows):
+                for c in range(self.cols):
+                    if self.warehouse_state[r][c] == "#" or (r, c) in goal_coords:
+                        continue
 
-                        if new_cost < value_grid[nr][nc]:
-                            value_grid[nr][nc] = new_cost
-                            policy_grid[nr][nc] = action
+                    floor_cost = self.warehouse_cost[r][c]
+                    best_action_value = self.max_cost
 
-                            # potential neighbors to explore its neighbors
-                            heapq.heappush(open_list, (new_cost, nr, nc))
+                    for move_idx, (dr, dc, move_cost, action_name) in enumerate(
+                        self.moves
+                    ):
+                        current_action_expected_cost = 0.0
 
-        return policy_grid
+                        outcomes = [
+                            (0, p_intended),
+                            (1, p_slanted),
+                            (-1, p_slanted),
+                            (2, p_sideways),
+                            (-2, p_sideways),
+                        ]
 
-    def get_box_policy(self, box_id, box_pos):
-        (br, bc) = box_pos
-        lift_cost = 4 + self.warehouse_cost[br][bc]
+                        for offset, prob in outcomes:
+                            actual_idx = (move_idx + offset) % 8
+                            adr, adc, amove_cost, _ = self.moves[actual_idx]
 
-        goals = list()
-        for dr, dc, _ in self.neighbors:
-            nr = br + dr
-            nc = bc + dc
+                            nr, nc = r + adr, c + adc
 
-            if 0 <= nr < self.rows and 0 <= nc < self.cols:
-                if self.warehouse_state[nr][nc] != "#":
-                    goals.append((nr, nc, lift_cost, f"lift {box_id}"))
+                            hit_wall = False
+                            if not (0 <= nr < self.rows and 0 <= nc < self.cols):
+                                hit_wall = True
+                            elif self.warehouse_state[nr][nc] == "#":
+                                hit_wall = True
 
-        policy_grid = self.plan_path(goals)
-        policy_grid[br][bc] = "B"
-        return policy_grid
+                            if hit_wall:
+                                penalty_cost = 100 + amove_cost + floor_cost
+                                term = penalty_cost + value_grid[r][c]
+                            else:
+                                step_cost = amove_cost + floor_cost
+                                term = step_cost + value_grid[nr][nc]
 
-    def get_dropzone_policy(self):
-        (dr, dc) = self.dropzone
-        down_cost = 2 + self.warehouse_cost[dr][dc]
+                            current_action_expected_cost += prob * term
 
-        goals = []
-        for dr_n, dc_n, action in self.neighbors:
-            nr = dr + dr_n
-            nc = dc + dc_n
+                        if current_action_expected_cost < best_action_value:
+                            best_action_value = current_action_expected_cost
 
-            if 0 <= nr < self.rows and 0 <= nc < self.cols:
-                if self.warehouse_state[nr][nc] != "#":
-                    opposite_action = self.opposite_directions[action]
-                    goals.append((nr, nc, down_cost, f"down {opposite_action}"))
+                    if abs(best_action_value - value_grid[r][c]) > max_change:
+                        max_change = abs(best_action_value - value_grid[r][c])
 
-        policy_grid = self.plan_path(goals)
+                    if best_action_value != float("inf"):
+                        value_grid[r][c] = best_action_value
 
-        min_move_cost = float("inf")
-        best_move_action = "-1"
+            if max_change < epsilon:
+                break
 
-        outgoing_moves = [
-            (-1, 0, 2, "n"),
-            (1, 0, 2, "s"),
-            (0, -1, 2, "w"),
-            (0, 1, 2, "e"),
-            (-1, 1, 3, "ne"),
-            (-1, -1, 3, "nw"),
-            (1, 1, 3, "se"),
-            (1, -1, 3, "sw"),
-        ]
+        for r in range(self.rows):
+            for c in range(self.cols):
+                if self.warehouse_state[r][c] == "#" or (r, c) in goal_coords:
+                    continue
 
-        for dr_n, dc_c, move_cost, action in outgoing_moves:
-            nr = dr + dr_n
-            nc = dc + dc_c
+                floor_cost = self.warehouse_cost[r][c]
+                best_val = float("inf")
+                best_action_str = "-1"
 
-            if (
-                0 <= nr < self.rows
-                and 0 <= nc < self.cols
-                and self.warehouse_state[nr][nc] != "#"
-            ):
-                cost_to_step_aside = move_cost + self.warehouse_cost[nr][nc]
+                for move_idx, (dr, dc, move_cost, action_name) in enumerate(self.moves):
+                    expected_cost = 0.0
+                    outcomes = [
+                        (0, p_intended),
+                        (1, p_slanted),
+                        (-1, p_slanted),
+                        (2, p_sideways),
+                        (-2, p_sideways),
+                    ]
+                    for offset, prob in outcomes:
+                        actual_idx = (move_idx + offset) % 8
+                        adr, adc, amove_cost, _ = self.moves[actual_idx]
+                        nr, nc = r + adr, c + adc
 
-                if cost_to_step_aside < min_move_cost:
-                    min_move_cost = cost_to_step_aside
-                    best_move_action = f"move {action}"
+                        hit_wall = False
+                        if not (0 <= nr < self.rows and 0 <= nc < self.cols):
+                            hit_wall = True
+                        elif self.warehouse_state[nr][nc] == "#":
+                            hit_wall = True
 
-        # dropzone cell - "step aside" move
-        policy_grid[dr][dc] = best_move_action
+                        if hit_wall:
+                            penalty = 100 + amove_cost + floor_cost
+                            expected_cost += prob * (penalty + value_grid[r][c])
+                        else:
+                            step = amove_cost + floor_cost
+                            expected_cost += prob * (step + value_grid[nr][nc])
 
-        return policy_grid
+                    if expected_cost <= best_val:
+                        best_val = expected_cost
+                        best_action_str = action_name
+
+                policy_grid[r][c] = best_action_str
+
+        return policy_grid, value_grid
 
     def generate_policies(self, debug=False):
-        """
-        generate_policies() is required and will be called by the autograder directly.
-        You may not change the function signature for it.
-        All print outs must be conditioned on the debug flag.
-        """
-
         box_id = self.todo[0]
         box_pos = self.boxes[box_id]
 
-        # The following is the hard coded solution to test case 1
-        to_box_policy = self.get_box_policy(box_id, box_pos)
+        box_goals = []
+        br, bc = box_pos
 
-        to_zone_policy = self.get_dropzone_policy()
+        adjacents = [
+            (-1, 0),
+            (1, 0),
+            (0, -1),
+            (0, 1),
+            (-1, -1),
+            (-1, 1),
+            (1, -1),
+            (1, 1),
+        ]
+
+        for dr, dc in adjacents:
+            nr, nc = br + dr, bc + dc
+            if 0 <= nr < self.rows and 0 <= nc < self.cols:
+                if self.warehouse_state[nr][nc] != "#":
+                    cost = 4 + self.warehouse_cost[br][bc]
+                    box_goals.append((nr, nc, cost, f"lift {box_id}"))
+
+        to_box_policy, to_box_values = self._solve_mdp(box_goals)
+        to_box_policy[br][bc] = "B"
+
+        dr, dc = self.dropzone
+        zone_goals = []
+
+        opposites = {
+            (-1, 0): "s",
+            (1, 0): "n",
+            (0, -1): "e",
+            (0, 1): "w",
+            (-1, -1): "se",
+            (-1, 1): "sw",
+            (1, -1): "ne",
+            (1, 1): "nw",
+        }
+
+        for dr_n, dc_n in adjacents:
+            nr, nc = dr + dr_n, dc + dc_n
+            if 0 <= nr < self.rows and 0 <= nc < self.cols:
+                if self.warehouse_state[nr][nc] != "#":
+                    down_cost = 2 + self.warehouse_cost[dr][dc]
+                    direction_str = opposites[(dr_n, dc_n)]
+                    zone_goals.append((nr, nc, down_cost, f"down {direction_str}"))
+
+        to_zone_policy, to_zone_values = self._solve_mdp(zone_goals)
 
         if debug:
             print("\nTo Box Policy:")
-            for i in range(len(to_box_policy)):
-                print(to_box_policy[i])
-
+            for row in to_box_policy:
+                print(row)
             print("\nTo Zone Policy:")
-            for i in range(len(to_zone_policy)):
-                print(to_zone_policy[i])
+            for row in to_zone_policy:
+                print(row)
 
-        # For debugging purposes you may wish to return values associated with each policy.
-        # Replace the default values of None with your grid of values below and turn on the
-        # VERBOSE_FLAG in the testing suite.
-        to_box_values = None
-        to_zone_values = None
         return to_box_policy, to_zone_policy, to_box_values, to_zone_values
 
 
